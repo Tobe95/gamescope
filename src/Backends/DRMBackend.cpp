@@ -421,7 +421,7 @@ namespace gamescope
 		~CDRMFb();
 
 		uint32_t GetFbId() const { return m_uFbId; }
-	
+
 	private:
 		uint32_t m_uFbId = 0;
 	};
@@ -559,12 +559,12 @@ static constexpr uint32_t s_kSteamDeckLCDRates[] =
 
 static constexpr uint32_t s_kSteamDeckOLEDRates[] =
 {
-	45, 47, 48, 49, 
-	50, 51, 53, 55, 56, 59, 
-	60, 62, 64, 65, 66, 68, 
-	72, 73, 76, 77, 78, 
-	80, 81, 82, 84, 85, 86, 87, 88, 
-	90, 
+	45, 47, 48, 49,
+	50, 51, 53, 55, 56, 59,
+	60, 62, 64, 65, 66, 68,
+	72, 73, 76, 77, 78,
+	80, 81, 82, 84, 85, 86, 87, 88,
+	90,
 };
 
 static void update_connector_display_info_wl(struct drm_t *drm)
@@ -1197,7 +1197,7 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 		return false;
 	if ( liftoff_device_register_all_planes( drm->lo_device ) < 0 )
 		return false;
-	
+
 	drm_log.infof("Connectors:");
 	for ( auto &iter : drm->connectors )
 	{
@@ -2152,10 +2152,6 @@ namespace gamescope
 			( m_Mutable.szMakePNP == "VLV"sv && m_Mutable.szModel == "Jupiter"sv ) ||
 			( m_Mutable.szMakePNP == "VLV"sv && m_Mutable.szModel == "Galileo"sv );
 
-		if ( g_customRefreshRates.size() > 0 && ( GetScreenType() == GAMESCOPE_SCREEN_TYPE_INTERNAL || g_bExternalForced ) ) {
-			m_Mutable.ValidDynamicRefreshRates = std::span(g_customRefreshRates);
-			return;
-		}
 		if ( bSteamDeckDisplay )
 		{
 			static constexpr uint32_t kPIDGalileoSDC = 0x3003;
@@ -2322,6 +2318,9 @@ namespace gamescope
 			{
 				m_Mutable.HDR.bExposeHDRSupport = false;
 			}
+		}
+		if ( g_customRefreshRates.size() > 0 && ( GetScreenType() == GAMESCOPE_SCREEN_TYPE_INTERNAL || g_bExternalForced ) ) {
+			m_Mutable.ValidDynamicRefreshRates = std::span(g_customRefreshRates);
 		}
 	}
 
@@ -3624,7 +3623,7 @@ namespace gamescope
 		{
 #if __linux__
 			auto [nMajor, nMinor, nPatch] = GetKernelVersion();
-			
+
 			// Only expose support on 6.8+ for eventfd fixes.
 			if ( nMajor < 6 )
 				return false;
