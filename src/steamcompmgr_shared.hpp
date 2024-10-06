@@ -125,12 +125,13 @@ struct steamcompmgr_win_t {
 	unsigned int requestedHeight = 0;
 	bool is_dialog = false;
 	bool maybe_a_dropdown = false;
-	bool outdatedInteractiveFocus = false;
 
 	bool hasHwndStyle = false;
 	uint32_t hwndStyle = 0;
 	bool hasHwndStyleEx = false;
 	uint32_t hwndStyleEx = 0;
+
+	bool bHasHadNonSRGBColorSpace = false;
 
 	bool nudged = false;
 	bool ignoreOverrideRedirect = false;

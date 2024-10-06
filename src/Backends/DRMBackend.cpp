@@ -2152,6 +2152,10 @@ namespace gamescope
 			( m_Mutable.szMakePNP == "VLV"sv && m_Mutable.szModel == "Jupiter"sv ) ||
 			( m_Mutable.szMakePNP == "VLV"sv && m_Mutable.szModel == "Galileo"sv );
 
+		if ( g_customRefreshRates.size() > 0 && ( GetScreenType() == GAMESCOPE_SCREEN_TYPE_INTERNAL || g_bExternalForced ) ) {
+			m_Mutable.ValidDynamicRefreshRates = std::span(g_customRefreshRates);
+			return;
+		}
 		if ( bSteamDeckDisplay )
 		{
 			static constexpr uint32_t kPIDGalileoSDC = 0x3003;
@@ -3227,10 +3231,10 @@ namespace gamescope
 			// thus: newLayout is ignored.
 			return VK_IMAGE_LAYOUT_GENERAL;
 		}
-        virtual void GetPreferredOutputFormat( VkFormat *pPrimaryPlaneFormat, VkFormat *pOverlayPlaneFormat ) const override
+        virtual void GetPreferredOutputFormat( uint32_t *pPrimaryPlaneFormat, uint32_t *pOverlayPlaneFormat ) const override
         {
-			*pPrimaryPlaneFormat = DRMFormatToVulkan( g_nDRMFormat, false );
-			*pOverlayPlaneFormat = DRMFormatToVulkan( g_nDRMFormatOverlay, false );
+			*pPrimaryPlaneFormat = g_nDRMFormat;
+			*pOverlayPlaneFormat = g_nDRMFormatOverlay;
         }
 		virtual bool ValidPhysicalDevice( VkPhysicalDevice pVkPhysicalDevice ) const override
 		{

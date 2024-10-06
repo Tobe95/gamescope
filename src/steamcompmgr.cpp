@@ -29,6 +29,7 @@
  *   says above. Not that I can really do anything about it
  */
 
+#include "gamescope_shared.h"
 #include "xwayland_ctx.hpp"
 #include <X11/X.h>
 #include <X11/Xlib.h>
@@ -195,7 +196,7 @@ update_runtime_info();
 
 gamescope::ConVar<bool> cv_adaptive_sync( "adaptive_sync", false, "Whether or not adaptive sync is enabled if available." );
 gamescope::ConVar<bool> cv_adaptive_sync_ignore_overlay( "adaptive_sync_ignore_overlay", false, "Whether or not to ignore overlay planes for pushing commits with adaptive sync." );
-gamescope::ConVar<int> cv_adaptive_sync_overlay_cycles( "adaptive_sync_overlay_cycles", 1, "" );
+gamescope::ConVar<int> cv_adaptive_sync_overlay_cycles( "adaptive_sync_overlay_cycles", 1, "Number of vblank cycles to ignore overlay repaints before forcing a commit with adaptive sync." );
 
 uint64_t g_SteamCompMgrLimitedAppRefreshCycle = 16'666'666;
 uint64_t g_SteamCompMgrAppRefreshCycle = 16'666'666;
@@ -1973,7 +1974,7 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
 			drawYOffset += w->GetGeometry().nY * currentScaleRatio_y;
 		}
 
-		if ( zoomScaleRatio != 1.0 )
+		if ( cursor && zoomScaleRatio != 1.0 )
 		{
 			drawXOffset += (((int)sourceWidth / 2) - cursor->x()) * currentScaleRatio_x;
 			drawYOffset += (((int)sourceHeight / 2) - cursor->y()) * currentScaleRatio_y;
@@ -2153,8 +2154,17 @@ static void paint_pipewire()
 	focus_t *pFocus = nullptr;
 	if ( ulFocusAppId )
 	{
+		static uint64_t s_ulLastFocusAppId = 0;
+
+		bool bAppIdChange = ulFocusAppId != s_ulLastFocusAppId;
+		if ( bAppIdChange )
+		{
+			xwm_log.infof( "Exposing appid %lu (%u 32-bit) focus-wise on pipewire stream.", ulFocusAppId, uint32_t( ulFocusAppId ) );
+			s_ulLastFocusAppId = ulFocusAppId;
+		}
+
 		static focus_t s_PipewireFocus{};
-		if ( s_PipewireFocus.IsDirty() )
+		if ( s_PipewireFocus.IsDirty() || bAppIdChange )
 		{
 			std::vector<steamcompmgr_win_t *> vecPossibleFocusWindows = GetGlobalPossibleFocusWindows();
 
@@ -2190,10 +2200,10 @@ static void paint_pipewire()
 	s_ulLastOverrideCommitId = ulOverrideCommitId;
 
 	// Paint the windows we have onto the Pipewire stream.
-	paint_window( pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, 0, 1.0f, pFocus->overrideWindow );
+	paint_window( pFocus->focusWindow, pFocus->focusWindow, &frameInfo, global_focus.cursor, 0, 1.0f, pFocus->overrideWindow );
 
 	if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
-		paint_window( pFocus->overrideWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
+		paint_window( pFocus->overrideWindow, pFocus->focusWindow, &frameInfo, global_focus.cursor, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
 
 	gamescope::Rc<CVulkanTexture> pRGBTexture = s_pPipewireBuffer->texture->isYcbcr()
 		? vulkan_acquire_screenshot_texture( g_nOutputWidth, g_nOutputHeight, false, DRM_FORMAT_XRGB2101010 )
@@ -2920,6 +2930,25 @@ std::string get_string_prop( xwayland_ctx_t *ctx, Window win, Atom prop )
 	return value;
 }
 
+void set_string_prop( xwayland_ctx_t *ctx, Atom prop, const std::string &value )
+{
+	XTextProperty text_property =
+	{
+		.value = ( unsigned char * )value.c_str(),
+		.encoding = ctx->atoms.utf8StringAtom,
+		.format = 8,
+		.nitems = strlen( value.c_str() )
+	};
+	XSetTextProperty( ctx->dpy, ctx->root, &text_property, prop);
+	XFlush( ctx->dpy );
+}
+
+void clear_prop( xwayland_ctx_t *ctx, Atom prop )
+{
+	XDeleteProperty( ctx->dpy, ctx->root, prop );
+	XFlush( ctx->dpy );
+}
+
 static bool
 win_has_game_id( steamcompmgr_win_t *w )
 {
@@ -3244,7 +3273,7 @@ found:;
 		if ( window_has_commits( focus ) )
 			out->focusWindow = focus;
 		else
-			focus->outdatedInteractiveFocus = true;
+			out->outdatedInteractiveFocus = true;
 
 		// Always update X's idea of focus, but still dirty
 		// the it being outdated so we can resolve that globally later.
@@ -4841,6 +4870,17 @@ void gamescope_set_selection(std::string contents, GamescopeSelection eSelection
 	}
 }
 
+void gamescope_set_reshade_effect(std::string effect_path)
+{
+	gamescope_xwayland_server_t *server = wlserver_get_xwayland_server(0);
+	set_string_prop(server->ctx.get(), server->ctx->atoms.gamescopeReshadeEffect, effect_path);
+}
+
+void gamescope_clear_reshade_effect() {
+	gamescope_xwayland_server_t *server = wlserver_get_xwayland_server(0);
+	clear_prop(server->ctx.get(), server->ctx->atoms.gamescopeReshadeEffect);
+}
+
 static void
 handle_selection_request(xwayland_ctx_t *ctx, XSelectionRequestEvent *ev)
 {
@@ -4914,13 +4954,14 @@ handle_selection_notify(xwayland_ctx_t *ctx, XSelectionEvent *ev)
 				&actual_type, &actual_format, &nitems, &bytes_after, &data);
 		if (data) {
 			const char *contents = (const char *) data;
+			auto szContents = std::make_shared<std::string>(contents);
 			defer( XFree( data ); );
 
 			if (ev->selection == ctx->atoms.clipboard)
 			{
 				if ( GetBackend()->GetNestedHints() )
 				{
-					//GetBackend()->GetNestedHints()->SetSelection()
+					GetBackend()->GetNestedHints()->SetSelection( szContents, GAMESCOPE_SELECTION_CLIPBOARD );
 				}
 				else
 				{
@@ -4931,7 +4972,7 @@ handle_selection_notify(xwayland_ctx_t *ctx, XSelectionEvent *ev)
 			{
 				if ( GetBackend()->GetNestedHints() )
 				{
-					//GetBackend()->GetNestedHints()->SetSelection()
+					GetBackend()->GetNestedHints()->SetSelection( szContents, GAMESCOPE_SELECTION_PRIMARY );
 				}
 				else
 				{
@@ -5984,28 +6025,37 @@ bool handle_done_commit( steamcompmgr_win_t *w, xwayland_ctx_t *ctx, uint64_t co
 			// Window just got a new available commit, determine if that's worth a repaint
 
 			// If this is an overlay that we're presenting, repaint
-			if ( w == global_focus.overlayWindow && w->opacity != TRANSLUCENT )
+			if ( gameFocused )
 			{
-				hasRepaintNonBasePlane = true;
-			}
+				if ( w == global_focus.overlayWindow && w->opacity != TRANSLUCENT )
+				{
+					hasRepaintNonBasePlane = true;
+				}
 
-			if ( w == global_focus.notificationWindow && w->opacity != TRANSLUCENT )
+				if ( w == global_focus.notificationWindow && w->opacity != TRANSLUCENT )
+				{
+					hasRepaintNonBasePlane = true;
+				}
+			}
+			if ( ctx )
 			{
-				hasRepaintNonBasePlane = true;
+				if ( ctx->focus.outdatedInteractiveFocus )
+				{
+					MakeFocusDirty();
+					ctx->focus.outdatedInteractiveFocus = false;
+				}
 			}
-
-			// If this is an external overlay, repaint
-			if ( w == global_focus.externalOverlayWindow && w->opacity != TRANSLUCENT )
-			{
-				hasRepaintNonBasePlane = true;
-			}
-
-			if ( w->outdatedInteractiveFocus )
+			if ( global_focus.outdatedInteractiveFocus )
 			{
 				MakeFocusDirty();
-				w->outdatedInteractiveFocus = false;
-			}
+				global_focus.outdatedInteractiveFocus = false;
 
+				// If this is an external overlay, repaint
+				if ( w == global_focus.externalOverlayWindow && w->opacity != TRANSLUCENT )
+				{
+					hasRepaintNonBasePlane = true;
+				}
+			}
 			// If this is the main plane, repaint
 			if ( w == global_focus.focusWindow && !w->isSteamStreamingClient )
 			{
@@ -6294,7 +6344,7 @@ static TempUpscaleImage_t *GetTempUpscaleImage( uint32_t uWidth, uint32_t uHeigh
 	return &image;
 }
 
-
+gamescope::ConVar<bool> cv_surface_update_force_only_current_surface( "surface_update_force_only_current_surface", false, "Force updates to apply only to the current surface, ignoring commits for other surfaces." );
 
 void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, ResListEntry_t& reslistentry)
 {
@@ -6305,13 +6355,45 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 		wlserver_lock();
 		wlr_buffer_unlock( buf );
 		wlserver_unlock();
+
+		// Make sure to send the discarded event if we hit this
+		// to ensure forward progress.
+		if (!reslistentry.presentation_feedbacks.empty())
+		{
+			wlserver_presentation_feedback_discard( reslistentry.surf, reslistentry.presentation_feedbacks );
+			// presentation_feedbacks cleared by wlserver_presentation_feedback_discard
+		}
+
 		xwm_log.errorf( "waylandres but no win" );
 		return;
 	}
 
-	// If we have an override surface, make sure this commit is for the current surface.
+	// If we ever use HDR on the surface, only ever accept flip commits from the WSI layer.
+	if ( reslistentry.feedback && reslistentry.feedback->vk_colorspace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR )
+	{
+		w->bHasHadNonSRGBColorSpace = true;
+	}
+
+	// If there are random commits that are really thin/small when we have the WSI layer active ever,
+	// let's just ignore these as they are probably bogus commits from glamor.
+	bool bPossiblyBogus = reslistentry.buf->width <= 2 || reslistentry.buf->height <= 2;
+
+	// If the buffer has no damage, always prefer our override surface.
+	bool bHasDamage = ( reslistentry.surf->buffer_damage.extents.x2 - reslistentry.surf->buffer_damage.extents.x1 ) > 2 &&
+					  ( reslistentry.surf->buffer_damage.extents.y2 - reslistentry.surf->buffer_damage.extents.y1 ) > 2;
+
+	// If we have an override surface, make sure this commit is for the current surface
+	// or if the commit is probably bogus.
+	bool bOnlyCurrentSurface = w->bHasHadNonSRGBColorSpace || bPossiblyBogus || !bHasDamage || cv_surface_update_force_only_current_surface;
+
 	bool for_current_surface = !w->override_surface() || w->current_surface() == reslistentry.surf;
-	if (!for_current_surface)
+
+	if ( !for_current_surface )
+	{
+		xwm_log.debugf( "Got commit not for current surface." );
+	}
+
+	if ( bOnlyCurrentSurface && !for_current_surface )
 	{
 		wlserver_lock();
 		wlr_buffer_unlock( buf );
@@ -7351,7 +7433,7 @@ steamcompmgr_main(int argc, char **argv)
 					g_FadeOutDuration = atoi(optarg);
 				} else if (strcmp(opt_name, "force-windows-fullscreen") == 0) {
 					bForceWindowsFullscreen = true;
-				} else if (strcmp(opt_name, "hdr-enabled") == 0) {
+				} else if (strcmp(opt_name, "hdr-enabled") == 0 || strcmp(opt_name, "hdr-enable") == 0) {
 					cv_hdr_enabled = true;
 				} else if (strcmp(opt_name, "bypass-steam-resolution") == 0) {
 					cv_bypass_steam_resolution = true;
@@ -7359,7 +7441,7 @@ steamcompmgr_main(int argc, char **argv)
 					g_bForceHDRSupportDebug = true;
  				} else if (strcmp(opt_name, "hdr-debug-force-output") == 0) {
 					g_bForceHDR10OutputDebug = true;
-				} else if (strcmp(opt_name, "hdr-itm-enable") == 0) {
+				} else if (strcmp(opt_name, "hdr-itm-enabled") == 0 || strcmp(opt_name, "hdr-itm-enable") == 0) {
 					g_bHDRItmEnable = true;
 				} else if (strcmp(opt_name, "sdr-gamut-wideness") == 0) {
 					g_ColorMgmt.pending.sdrGamutWideness = atof(optarg);
@@ -7804,7 +7886,7 @@ steamcompmgr_main(int argc, char **argv)
 
 		// If we are running behind, allow tearing.
 
-		const bool bForceRepaint = g_bForceRepaint.exchange(false);
+		const bool bForceRepaint = vblank && g_bForceRepaint.exchange(false);
 		const bool bForceSyncFlip = bForceRepaint || is_fading_out();
 
 		// If we are compositing, always force sync flips because we currently wait
